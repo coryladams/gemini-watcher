@@ -109,10 +109,29 @@ def clean_gemini_output(text: str) -> str:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
 
-    # 3. Ensure it starts with the frontmatter '---' and not '```yaml'
-    if text.startswith("```yaml"):
-        text = text.replace("```yaml", "", 1).strip()
-    
+    # 3. Fix yaml code blocks mistakenly used for frontmatter
+    if text.startswith("yaml\n---"):
+        text = text[5:]
+    elif text.startswith("yaml\n"):
+        text = "---\n" + text[5:]
+        
+    # 4. Enforce strict Obsidian frontmatter (must start with ---)
+    if not text.startswith("---"):
+        # If it doesn't start with --- but looks like it has properties, wrap it
+        if text.startswith("title:") or text.startswith("create-date:"):
+            text = "---\n" + text
+            
+            # Find where to put the closing ---
+            lines = text.splitlines()
+            for i, line in enumerate(lines):
+                if line.strip() == "" or line.startswith("#") or line.startswith(">"):
+                    lines.insert(i, "---")
+                    text = "\n".join(lines)
+                    break
+        else:
+            # Fallback if the model completely failed the frontmatter
+            text = f"---\ntitle: \"Processed Document\"\ncreate-date: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n---\n\n" + text
+
     return text
 
 # --- Process with Gemini CLI -------------------------------------------------
@@ -124,9 +143,10 @@ You are an expert Research Archivist.
 Format the output as Obsidian-optimized Markdown.
 
 CRITICAL FORMATTING RULES:
-1. Start IMMEDIATELY with '---' for the YAML frontmatter.
-2. DO NOT wrap the frontmatter or the entire response in code blocks (```).
-3. YAML Frontmatter must use this EXACT structure (NO '#' symbols in the tags list):
+1. You MUST start your response with exactly three dashes `---` on the very first line.
+2. You MUST close the frontmatter block with exactly three dashes `---` on its own line.
+3. DO NOT wrap the frontmatter in a markdown code block (no ``` or ```yaml).
+4. YAML Frontmatter must use this EXACT structure:
 ---
 title: "[Descriptive Title]"
 create-date: {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -137,9 +157,9 @@ tags:
   - tag2
 status: complete
 ---
-4. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
-5. Use [[wikilinks]] for technical concepts throughout the body.
-6. Use Obsidian callouts (> [!summary], etc.) for key sections.
+5. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
+6. Use [[wikilinks]] for technical concepts throughout the body.
+7. Use Obsidian callouts (> [!summary], etc.) for key sections.
 </system_instruction>
 
 Task: {instructions}
