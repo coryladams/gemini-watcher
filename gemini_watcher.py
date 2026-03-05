@@ -85,6 +85,13 @@ def read_file_content(file_path: Path) -> str | None:
             for page in reader.pages:
                 text += page.extract_text() + "\n"
             return text
+        elif file_path.suffix.lower() == ".url":
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                if line.upper().startswith("URL="):
+                    url = line[4:].strip()
+                    return f"Please use your web fetch capabilities to read and analyze this URL:\n{url}"
+            return content
         else:
             return file_path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
