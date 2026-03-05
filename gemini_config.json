@@ -5,6 +5,21 @@
   "archive_originals": true,
   "model": "gemini-2.0-flash",
   "routes": {
+    "research": {
+      "extensions": ["pdf", "txt", "md"],
+      "destination": "Research",
+      "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
+    },
+    "code": {
+      "extensions": ["py", "cpp", "h", "js", "ts"],
+      "destination": "Research/Code",
+      "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
+    },
+    "data": {
+      "extensions": ["csv", "json"],
+      "destination": "Research/Data",
+      "instructions": "Analyze this dataset. Identify patterns, anomalies, and provide a high-level statistical summary."
+    },
     "images": {
       "extensions": ["png", "jpg", "jpeg", "webp"],
       "destination": "Research/Images",
