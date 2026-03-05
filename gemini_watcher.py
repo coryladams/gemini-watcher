@@ -14,6 +14,7 @@ import json
 import logging
 import subprocess
 import pypdf
+import shutil
 from pathlib import Path
 from datetime import datetime
 from watchdog.observers import Observer
@@ -23,6 +24,7 @@ from watchdog.events import FileSystemEventHandler
 VAULT_ROOT = "/mnt/c/Users/cadams/Documents/Obsidian/RegenMed/Coding 1s & 0s"
 DEFAULT_WATCH_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop"
 DEFAULT_ARCHIVE_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop/Archive"
+ATTACHMENTS_DIR = "Research/Attachments"
 
 CONFIG_PATH = Path(__file__).parent / "gemini_config.json"
 
@@ -32,7 +34,7 @@ def load_config():
         "vault_root": VAULT_ROOT,
         "archive_dir": DEFAULT_ARCHIVE_DIR,
         "archive_originals": True,
-        "model": "gemini-2.0-flash", # Fast & high-quality for summaries
+        "model": "gemini-2.0-flash",
         "routes": {
             "research": {
                 "extensions": ["pdf", "txt", "md"],
@@ -48,6 +50,16 @@ def load_config():
                 "extensions": ["csv", "json"],
                 "destination": "Research/Data",
                 "instructions": "Analyze this dataset. Identify patterns, anomalies, and provide a high-level statistical summary."
+            },
+            "images": {
+                "extensions": ["png", "jpg", "jpeg", "webp"],
+                "destination": "Research/Images",
+                "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
+            },
+            "webpages": {
+                "extensions": ["html", "htm", "url", "webloc"],
+                "destination": "Research/Webclips",
+                "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources. (If provided a URL, fetch it first)."
             }
         }
     }
@@ -76,7 +88,7 @@ def resolve_path(path: str) -> Path:
         return Path(f"/mnt/{drive}/{rest}")
     return Path(path).expanduser()
 
-# --- Read File (with PDF support) -------------------------------------------
+# --- Read File (with PDF & URL support) -------------------------------------
 def read_file_content(file_path: Path) -> str | None:
     try:
         if file_path.suffix.lower() == ".pdf":
@@ -124,11 +136,8 @@ def clean_gemini_output(text: str) -> str:
         
     # 4. Enforce strict Obsidian frontmatter (must start with ---)
     if not text.startswith("---"):
-        # If it doesn't start with --- but looks like it has properties, wrap it
         if text.startswith("title:") or text.startswith("create-date:"):
             text = "---\n" + text
-            
-            # Find where to put the closing ---
             lines = text.splitlines()
             for i, line in enumerate(lines):
                 if line.strip() == "" or line.startswith("#") or line.startswith(">"):
@@ -136,7 +145,6 @@ def clean_gemini_output(text: str) -> str:
                     text = "\n".join(lines)
                     break
         else:
-            # Fallback if the model completely failed the frontmatter
             text = f"---\ntitle: \"Processed Document\"\ncreate-date: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n---\n\n" + text
 
     return text
@@ -153,7 +161,7 @@ CRITICAL FORMATTING RULES:
 1. You MUST start your response with exactly three dashes `---` on the very first line.
 2. You MUST close the frontmatter block with exactly three dashes `---` on its own line.
 3. DO NOT wrap the frontmatter in a markdown code block (no ``` or ```yaml).
-4. YAML Frontmatter must use this EXACT structure:
+4. YAML Frontmatter must use this EXACT structure (NO '#' symbols in the tags list):
 ---
 title: "[Descriptive Title]"
 create-date: {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -175,12 +183,16 @@ Task: {instructions}
     
     cmd = ["gemini"]
     
-    # If content is None, it means it's a binary/image file, so we use the @ syntax
+    # If content is None, it means it's a binary/image file.
     if content is None:
-        cmd.append(f"@{file_path}")
+        # We copy it locally to the project dir so Gemini CLI can read it without workspace errors
+        local_copy = Path(__file__).parent / file_path.name
+        shutil.copy2(file_path, local_copy)
+        
+        cmd.append(f"@{local_copy.name}")
         cmd.append(prompt)
     else:
-        # For text files, we append the content to the prompt to ensure it's processed fully
+        # For text files, we append the content to the prompt
         max_chars = 500000 
         clean_content = content.replace("\u0000", "")
         prompt += f"\n--- FILE: {file_path.name} ---\n{clean_content[:max_chars]}\n--- END ---\n"
@@ -194,6 +206,11 @@ Task: {instructions}
             timeout=300,
             encoding="utf-8"
         )
+        
+        # Cleanup the local copy if we made one
+        if content is None:
+            local_copy.unlink(missing_ok=True)
+            
         if result.returncode != 0:
             raise RuntimeError(f"gemini command failed: {result.stderr.strip()}")
         
@@ -202,8 +219,9 @@ Task: {instructions}
     except FileNotFoundError:
         raise RuntimeError("Gemini CLI not found. Run 'npm install -g @google/gemini-cli'.")
 
-# --- Routing & Archiving -----------------------------------------------------
+# --- Routing, Archiving & Embedding ------------------------------------------
 def route_output(original_path: Path, output: str, route: dict, config: dict):
+    # 1. Write the markdown note
     dest_dir = resolve_path(config["vault_root"]) / route.get("destination", "Inbox")
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,8 +230,37 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
         timestamp = datetime.now().strftime("%H%M%S")
         dest_file = dest_dir / f"{original_path.stem}-{timestamp}.md"
 
+    # Append the embed link if it's an image or PDF
+    if route["name"] in ["images", "research"] and original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf"]:
+        output += f"\n\n---\n## Source File\n![[{original_path.name}]]\n"
+
+    # Append the source link if it's an internet shortcut
+    if original_path.suffix.lower() in [".url", ".webloc"]:
+        try:
+            content = original_path.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                if line.upper().startswith("URL="):
+                    url = line[4:].strip()
+                    output += f"\n\n---\n## Source Link\n**[🔗 View Original Webpage]({url})**\n"
+                    break
+        except Exception:
+            pass
+
     dest_file.write_text(output, encoding="utf-8")
-    print(f"  ✅ → {wsl_to_windows(str(dest_file))}")
+    print(f"  ✅ Note → {wsl_to_windows(str(dest_file))}")
+    
+    # 2. Move the original file to the Obsidian attachments folder
+    if route["name"] in ["images", "research"] and original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf"]:
+        attach_dir = resolve_path(config["vault_root"]) / ATTACHMENTS_DIR
+        attach_dir.mkdir(parents=True, exist_ok=True)
+        attach_file = attach_dir / original_path.name
+        
+        if attach_file.exists():
+            attach_file = attach_dir / f"{original_path.stem}-{int(time.time())}{original_path.suffix}"
+            
+        shutil.copy2(original_path, attach_file)
+        print(f"  ✅ Attachment → {wsl_to_windows(str(attach_file))}")
+        
     sys.stdout.flush()
 
 def archive_original(file_path: Path, config: dict):
@@ -251,10 +298,9 @@ class GeminiHandler(FileSystemEventHandler):
         logging.info(f"DETECTED: {file_path.name}")
         print(f"\n📥 {file_path.name}")
         sys.stdout.flush()
-        time.sleep(1) 
+        time.sleep(2) # Give Windows extra time to finish writing the file
         
         try:
-            # Determine if we should read text or pass the file path directly for multimodal
             content = None
             if route["name"] not in ["images"]:
                 content = read_file_content(file_path)
@@ -268,8 +314,10 @@ class GeminiHandler(FileSystemEventHandler):
             
             output = process_with_gemini(file_path, content, route, self.config)
             route_output(file_path, output, route, self.config)
+            
             if self.config["archive_originals"]:
                 archive_original(file_path, self.config)
+                
         except Exception as e:
             logging.error(f"ERROR: {file_path.name}: {e}")
             print(f"  ❌ Error: {e}")
@@ -282,7 +330,6 @@ class GeminiHandler(FileSystemEventHandler):
 def main():
     config = load_config()
     
-    # Setup Logging to both file and console
     log_path = Path(__file__).parent / "watcher.log"
     logging.basicConfig(
         level=logging.INFO,
@@ -295,13 +342,13 @@ def main():
     )
     
     watch_dir = resolve_path(config["watch_dir"])
+    watch_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"👁  Gemini Vault Watcher Active")
     logging.info(f"STARTED: Monitoring {wsl_to_windows(str(watch_dir))}")
     print(f"   Watching: {wsl_to_windows(str(watch_dir))}")
     print(f"   Vault:    {wsl_to_windows(config['vault_root'])}")
     
-    # Start the observer
     handler = GeminiHandler(config)
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=False)
@@ -312,7 +359,6 @@ def main():
 
     try:
         while True:
-            # Fallback: Manual poll for files every 10 seconds in case events miss
             for item in watch_dir.iterdir():
                 if item.is_file() and not item.name.startswith("."):
                     handler.process(item)
