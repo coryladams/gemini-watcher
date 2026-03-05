@@ -13,6 +13,7 @@ import time
 import json
 import logging
 import subprocess
+import pypdf
 from pathlib import Path
 from datetime import datetime
 from watchdog.observers import Observer
@@ -75,6 +76,45 @@ def resolve_path(path: str) -> Path:
         return Path(f"/mnt/{drive}/{rest}")
     return Path(path).expanduser()
 
+# --- Read File (with PDF support) -------------------------------------------
+def read_file_content(file_path: Path) -> str | None:
+    try:
+        if file_path.suffix.lower() == ".pdf":
+            reader = pypdf.PdfReader(file_path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+        else:
+            return file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        logging.warning(f"  Could not read {file_path.name}: {e}")
+        return None
+
+# --- Clean Output -----------------------------------------------------------
+def clean_gemini_output(text: str) -> str:
+    """Removes CLI warnings and rogue code fences that break Obsidian."""
+    lines = text.splitlines()
+    
+    # 1. Filter out known CLI warnings
+    filtered = [l for l in lines if "MCP issues detected" not in l and "Run /mcp list" not in l]
+    text = "\n".join(filtered).strip()
+
+    # 2. Remove a single leading/trailing code block if the model wrapped everything
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # 3. Ensure it starts with the frontmatter '---' and not '```yaml'
+    if text.startswith("```yaml"):
+        text = text.replace("```yaml", "", 1).strip()
+    
+    return text
+
 # --- Process with Gemini CLI -------------------------------------------------
 def process_with_gemini(file_path: Path, content: str, route: dict, config: dict) -> str:
     instructions = route.get("instructions", "Analyze this file.")
@@ -82,31 +122,44 @@ def process_with_gemini(file_path: Path, content: str, route: dict, config: dict
     # Gemini's large context window means we don't need to truncate as much.
     max_chars = 500000 
     
+    # Clean content of any null bytes to avoid shell issues
+    clean_content = content.replace("\u0000", "")
+
     prompt = f"""<system_instruction>
 You are an expert Research Archivist. 
 Format the output as Obsidian-optimized Markdown.
-- Use YAML frontmatter (title, date, tags).
-- Use [[wikilinks]] for technical concepts.
-- Use Obsidian callouts (> [!summary], etc.)
+
+CRITICAL FORMATTING RULES:
+1. Start IMMEDIATELY with '---' for the YAML frontmatter.
+2. DO NOT wrap the frontmatter or the entire response in code blocks (```).
+3. YAML Frontmatter must include:
+   - title: [Descriptive Title]
+   - date: [YYYY-MM-DD]
+   - tags: ["#tag1", "#tag2"]  <-- MUST USE THIS FORMAT (quoted with # symbol)
+4. PREFERRED TAGS: Use these existing tags if relevant: ["#arduino", "#cpp", "#python", "#automation", "#hardware", "#schematics", "#research", "#data", "#tutorial", "#plc"]
+5. Use [[wikilinks]] for technical concepts throughout the body.
+6. Use Obsidian callouts (> [!summary], etc.) for key sections.
 </system_instruction>
 
 Task: {instructions}
 
 --- FILE: {file_path.name} ---
-{content[:max_chars]}
+{clean_content[:max_chars]}
 --- END ---"""
 
     try:
         result = subprocess.run(
-            ["gemini", "ask", prompt],
+            ["gemini", prompt],
             capture_output=True,
             text=True,
             timeout=300,
             encoding="utf-8"
         )
         if result.returncode != 0:
-            raise RuntimeError(f"gemini ask failed: {result.stderr.strip()}")
-        return result.stdout.strip()
+            raise RuntimeError(f"gemini command failed: {result.stderr.strip()}")
+        
+        raw_output = result.stdout.strip()
+        return clean_gemini_output(raw_output)
     except FileNotFoundError:
         raise RuntimeError("Gemini CLI not found. Run 'npm install -g @google/gemini-cli'.")
 
@@ -122,6 +175,7 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
 
     dest_file.write_text(output, encoding="utf-8")
     print(f"  ✅ → {wsl_to_windows(str(dest_file))}")
+    sys.stdout.flush()
 
 def archive_original(file_path: Path, config: dict):
     archive_dir = resolve_path(config["archive_dir"])
@@ -134,12 +188,16 @@ def archive_original(file_path: Path, config: dict):
 class GeminiHandler(FileSystemEventHandler):
     def __init__(self, config):
         self.config = config
+        self.processing = set()
 
     def on_created(self, event):
         if event.is_directory: return
-        file_path = Path(event.src_path)
+        self.process(Path(event.src_path))
+
+    def process(self, file_path: Path):
+        if file_path in self.processing or not file_path.exists():
+            return
         
-        # Determine route based on extension
         ext = file_path.suffix.lower().lstrip(".")
         route = None
         for r_name, r_data in self.config["routes"].items():
@@ -150,41 +208,77 @@ class GeminiHandler(FileSystemEventHandler):
         
         if not route: return
 
+        self.processing.add(file_path)
+        logging.info(f"DETECTED: {file_path.name}")
         print(f"\n📥 {file_path.name}")
+        sys.stdout.flush()
         time.sleep(1) 
         
         try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
+            content = read_file_content(file_path)
+            if not content:
+                logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
+                return
+
+            logging.info(f"PROCESSING: {file_path.name} via Gemini ({route['name']})")
             print(f"  🤖 Processing via Gemini ({route['name']})...")
+            sys.stdout.flush()
+            
             output = process_with_gemini(file_path, content, route, self.config)
             route_output(file_path, output, route, self.config)
             if self.config["archive_originals"]:
                 archive_original(file_path, self.config)
         except Exception as e:
+            logging.error(f"ERROR: {file_path.name}: {e}")
             print(f"  ❌ Error: {e}")
+            sys.stdout.flush()
+        finally:
+            if file_path in self.processing:
+                self.processing.remove(file_path)
 
 # --- Main --------------------------------------------------------------------
 def main():
     config = load_config()
+    
+    # Setup Logging to both file and console
+    log_path = Path(__file__).parent / "watcher.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        handlers=[
+            logging.FileHandler(log_path),
+            logging.StreamHandler(sys.stdout)
+        ],
+        force=True
+    )
+    
     watch_dir = resolve_path(config["watch_dir"])
-    watch_dir.mkdir(parents=True, exist_ok=True)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     
     print(f"👁  Gemini Vault Watcher Active")
+    logging.info(f"STARTED: Monitoring {wsl_to_windows(str(watch_dir))}")
     print(f"   Watching: {wsl_to_windows(str(watch_dir))}")
     print(f"   Vault:    {wsl_to_windows(config['vault_root'])}")
     
+    # Start the observer
     handler = GeminiHandler(config)
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=False)
     observer.start()
 
+    print("   Status: Monitoring active (with 10s poll fallback)")
+    sys.stdout.flush()
+
     try:
-        while True: time.sleep(1)
+        while True:
+            # Fallback: Manual poll for files every 10 seconds in case events miss
+            for item in watch_dir.iterdir():
+                if item.is_file() and not item.name.startswith("."):
+                    handler.process(item)
+            time.sleep(10)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
+
 
 if __name__ == "__main__":
     main()
