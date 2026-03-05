@@ -132,11 +132,18 @@ Format the output as Obsidian-optimized Markdown.
 CRITICAL FORMATTING RULES:
 1. Start IMMEDIATELY with '---' for the YAML frontmatter.
 2. DO NOT wrap the frontmatter or the entire response in code blocks (```).
-3. YAML Frontmatter must include:
-   - title: [Descriptive Title]
-   - date: [YYYY-MM-DD]
-   - tags: ["#tag1", "#tag2"]  <-- MUST USE THIS FORMAT (quoted with # symbol)
-4. PREFERRED TAGS: Use these existing tags if relevant: ["#arduino", "#cpp", "#python", "#automation", "#hardware", "#schematics", "#research", "#data", "#tutorial", "#plc"]
+3. YAML Frontmatter must use this EXACT structure (NO '#' symbols in the tags list):
+---
+title: "[Descriptive Title]"
+create-date: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+type: reference
+Project: Home
+tags:
+  - tag1
+  - tag2
+status: complete
+---
+4. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
 5. Use [[wikilinks]] for technical concepts throughout the body.
 6. Use Obsidian callouts (> [!summary], etc.) for key sections.
 </system_instruction>
