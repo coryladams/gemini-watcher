@@ -116,15 +116,9 @@ def clean_gemini_output(text: str) -> str:
     return text
 
 # --- Process with Gemini CLI -------------------------------------------------
-def process_with_gemini(file_path: Path, content: str, route: dict, config: dict) -> str:
+def process_with_gemini(file_path: Path, content: str | None, route: dict, config: dict) -> str:
     instructions = route.get("instructions", "Analyze this file.")
     
-    # Gemini's large context window means we don't need to truncate as much.
-    max_chars = 500000 
-    
-    # Clean content of any null bytes to avoid shell issues
-    clean_content = content.replace("\u0000", "")
-
     prompt = f"""<system_instruction>
 You are an expert Research Archivist. 
 Format the output as Obsidian-optimized Markdown.
@@ -150,13 +144,24 @@ status: complete
 
 Task: {instructions}
 
---- FILE: {file_path.name} ---
-{clean_content[:max_chars]}
---- END ---"""
+"""
+    
+    cmd = ["gemini"]
+    
+    # If content is None, it means it's a binary/image file, so we use the @ syntax
+    if content is None:
+        cmd.append(f"@{file_path}")
+        cmd.append(prompt)
+    else:
+        # For text files, we append the content to the prompt to ensure it's processed fully
+        max_chars = 500000 
+        clean_content = content.replace("\u0000", "")
+        prompt += f"\n--- FILE: {file_path.name} ---\n{clean_content[:max_chars]}\n--- END ---\n"
+        cmd.append(prompt)
 
     try:
         result = subprocess.run(
-            ["gemini", prompt],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,
@@ -222,10 +227,13 @@ class GeminiHandler(FileSystemEventHandler):
         time.sleep(1) 
         
         try:
-            content = read_file_content(file_path)
-            if not content:
-                logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
-                return
+            # Determine if we should read text or pass the file path directly for multimodal
+            content = None
+            if route["name"] not in ["images"]:
+                content = read_file_content(file_path)
+                if not content:
+                    logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
+                    return
 
             logging.info(f"PROCESSING: {file_path.name} via Gemini ({route['name']})")
             print(f"  🤖 Processing via Gemini ({route['name']})...")

@@ -3,5 +3,17 @@
   "vault_root": "C:\\Users\\cadams\\Documents\\Obsidian\\RegenMed\\Coding 1s & 0s",
   "archive_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop\\Archive",
   "archive_originals": true,
-  "model": "gemini-2.0-flash"
+  "model": "gemini-2.0-flash",
+  "routes": {
+    "images": {
+      "extensions": ["png", "jpg", "jpeg", "webp"],
+      "destination": "Research/Images",
+      "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
+    },
+    "webpages": {
+      "extensions": ["html", "htm"],
+      "destination": "Research/Webclips",
+      "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources."
+    }
+  }
 }
