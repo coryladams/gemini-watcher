@@ -1,0 +1,7 @@
+{
+  "watch_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop",
+  "vault_root": "C:\\Users\\cadams\\Documents\\Obsidian\\RegenMed\\Coding 1s & 0s",
+  "archive_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop\\Archive",
+  "archive_originals": true,
+  "model": "gemini-2.0-flash"
+}
