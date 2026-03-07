@@ -29,6 +29,7 @@ from watchdog.events import FileSystemEventHandler
 VAULT_ROOT = "/mnt/c/Users/cadams/Documents/Obsidian/RegenMed"
 DEFAULT_WATCH_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop"
 DEFAULT_ARCHIVE_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop/Archive"
+DEFAULT_FAILED_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop/Failed"
 ATTACHMENTS_DIR = "Research/Attachments"
 
 CONFIG_PATH = Path(__file__).parent / "gemini_config.json"
@@ -38,17 +39,18 @@ def load_config():
         "watch_dir": DEFAULT_WATCH_DIR,
         "vault_root": VAULT_ROOT,
         "archive_dir": DEFAULT_ARCHIVE_DIR,
+        "failed_dir": DEFAULT_FAILED_DIR,
         "archive_originals": True,
         "smart_routing": True,
         "model": "gemini-3.1-flash",
         "routes": {
             "research": {
-                "extensions": ["pdf", "txt", "md"],
+                "extensions": ["pdf", "txt", "md", "rtf", "epub"],
                 "destination": "Research",
                 "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
             },
             "code": {
-                "extensions": ["py", "cpp", "h", "js", "ts"],
+                "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
                 "destination": "Research/Code",
                 "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
             },
@@ -62,8 +64,13 @@ def load_config():
                 "destination": "Research/Images",
                 "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
             },
+            "media": {
+                "extensions": ["mp3", "mp4", "wav", "m4a", "mov"],
+                "destination": "Research/Media",
+                "instructions": "Analyze this media file. For audio, provide a transcript and summary. For video, describe the visual content, any spoken words, and summarize the key events."
+            },
             "webpages": {
-                "extensions": ["html", "htm", "url", "webloc"],
+                "extensions": ["html", "htm", "mhtml", "mht", "xml", "url", "webloc", "desktop"],
                 "destination": "Research/Webclips",
                 "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources. (If provided a URL, fetch it first)."
             }
@@ -100,29 +107,18 @@ class VaultIndexer:
         self.vault_root = resolve_path(vault_root)
         self.cache_file = Path(__file__).parent / ".vault_index.json"
         self.ignore_dirs = {".git", ".obsidian", ".trash", "_attachments"}
-
-    def _get_dir_hash(self) -> str:
-        dir_stat = []
-        for root, dirs, files in os.walk(self.vault_root):
-            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith(".")]
-            try:
-                rel_path = str(Path(root).relative_to(self.vault_root))
-                dir_stat.append(rel_path)
-            except ValueError:
-                pass
-        return hashlib.md5("".join(dir_stat).encode()).hexdigest()
+        self.cache_expiry = 86400  # 24 hours
 
     def get_map(self) -> list[str]:
         if not self.vault_root.exists():
             return []
             
-        current_hash = self._get_dir_hash()
-        
+        # Check cache validity
         if self.cache_file.exists():
             try:
                 with open(self.cache_file, "r") as f:
                     cache = json.load(f)
-                    if cache.get("hash") == current_hash:
+                    if time.time() - cache.get("timestamp", 0) < self.cache_expiry:
                         return cache.get("folders", [])
             except Exception:
                 pass
@@ -141,12 +137,19 @@ class VaultIndexer:
         # Save cache
         try:
             with open(self.cache_file, "w") as f:
-                json.dump({"hash": current_hash, "folders": folders}, f)
+                json.dump({"timestamp": time.time(), "folders": folders}, f)
         except Exception as e:
             logging.warning(f"Could not save vault index cache: {e}")
             
         return folders
-        
+
+    def invalidate_cache(self):
+        if self.cache_file.exists():
+            try:
+                self.cache_file.unlink()
+            except Exception:
+                pass
+
     def fuzzy_match_folder(self, target: str, folders: list[str]) -> str | None:
         if not target or target == "Inbox":
             return None
@@ -158,12 +161,9 @@ class VaultIndexer:
 # --- Read File (with PDF & URL support) -------------------------------------
 def read_file_content(file_path: Path) -> str | None:
     try:
-        if file_path.suffix.lower() == ".pdf":
-            reader = pypdf.PdfReader(file_path)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-            return text
+        if file_path.suffix.lower() in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"]:
+            # Return None to trigger raw binary file processing by Gemini CLI
+            return None
         elif file_path.suffix.lower() == ".docx":
             doc = docx.Document(file_path)
             return "\n".join([para.text for para in doc.paragraphs])
@@ -186,6 +186,9 @@ def read_file_content(file_path: Path) -> str | None:
                     if any(row_text):
                         text.append("\t".join(row_text))
             return "\n".join(text)
+        elif file_path.suffix.lower() in [".mhtml", ".mht"]:
+            # MHTML files can be processed natively by Gemini
+            return None
         elif file_path.suffix.lower() == ".url":
             content = file_path.read_text(encoding="utf-8", errors="replace")
             for line in content.splitlines():
@@ -297,15 +300,14 @@ Task: {instructions}
     
     cmd_base = ["gemini"]
     
-    # Define fallback models
+    # Define fallback models (Ordered by Capability vs Cost)
     fallback_models = [
-      #  "gemini-3.1-flash-lite", 
-       # "gemini-3.1-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-3-flash-preview", 
         "gemini-2.5-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-2.0-flash"
+        "gemini-3.1-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-1.5-pro"
     ]
     
     # Always put the configured model first, followed by the rest
@@ -390,37 +392,39 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
 
     # 1. Write the markdown note
     dest_dir = resolve_path(config["vault_root"]) / target_dest
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    if not dest_dir.exists():
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if config.get("smart_routing", False):
+            VaultIndexer(config["vault_root"]).invalidate_cache()
+            logging.info(f"  🔄 Created new folder '{target_dest}', invalidated index cache")
 
     dest_file = dest_dir / f"{original_path.stem}.md"
     if dest_file.exists():
         timestamp = datetime.now().strftime("%H%M%S")
         dest_file = dest_dir / f"{original_path.stem}-{timestamp}.md"
 
-    # Append the embed link if it's an image, PDF, or Office doc
-    attachable_exts = [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".docx", ".pptx", ".xlsx"]
-    attachable_routes = ["images", "research", "data"]
-    
-    if route["name"] in attachable_routes and original_path.suffix.lower() in attachable_exts:
-        output += f"\n\n---\n## Source File\n![[{original_path.name}]]\n"
-
     # Append the source link if it's an internet shortcut
     if original_path.suffix.lower() in [".url", ".webloc"]:
         try:
-            content = original_path.read_text(encoding="utf-8", errors="replace")
-            for line in content.splitlines():
+            url_content = original_path.read_text(encoding="utf-8", errors="replace")
+            for line in url_content.splitlines():
                 if line.upper().startswith("URL="):
                     url = line[4:].strip()
                     output += f"\n\n---\n## Source Link\n**[🔗 View Original Webpage]({url})**\n"
                     break
         except Exception:
             pass
+    else:
+        # For all other files, append an embed link
+        # Use ![[file]] for images/pdfs, and [[file]] for others like code
+        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"] else ""
+        output += f"\n\n---\n## Source File\n{embed_prefix}[[{original_path.name}]]\n"
 
     dest_file.write_text(output, encoding="utf-8")
     print(f"  ✅ Note → {wsl_to_windows(str(dest_file))}")
     
-    # 2. Move the original file to the Obsidian attachments folder
-    if route["name"] in attachable_routes and original_path.suffix.lower() in attachable_exts:
+    # 2. Always move the original file to the Obsidian attachments folder (except shortcuts)
+    if original_path.suffix.lower() not in [".url", ".webloc"]:
         attach_dir = resolve_path(config["vault_root"]) / ATTACHMENTS_DIR
         attach_dir.mkdir(parents=True, exist_ok=True)
         attach_file = attach_dir / original_path.name
@@ -432,6 +436,16 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
         print(f"  ✅ Attachment → {wsl_to_windows(str(attach_file))}")
         
     sys.stdout.flush()
+
+def move_to_failed(file_path: Path, config: dict):
+    failed_dir = resolve_path(config["failed_dir"])
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    dest = failed_dir / file_path.name
+    # Append timestamp if it exists to avoid overwriting failed files
+    if dest.exists():
+         dest = failed_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
+    file_path.rename(dest)
+    logging.info(f"  ❌ Moved to Failed: {file_path.name}")
 
 def archive_original(file_path: Path, config: dict):
     archive_dir = resolve_path(config["archive_dir"])
@@ -472,7 +486,8 @@ class GeminiHandler(FileSystemEventHandler):
         
         try:
             content = None
-            if route["name"] not in ["images"]:
+            # Do not extract text for natively handled types (images, pdfs, media, mhtml)
+            if route["name"] not in ["images", "media"] and file_path.suffix.lower() not in [".pdf", ".mhtml", ".mht"]:
                 content = read_file_content(file_path)
                 if not content:
                     logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
@@ -492,6 +507,11 @@ class GeminiHandler(FileSystemEventHandler):
             logging.error(f"ERROR: {file_path.name}: {e}")
             print(f"  ❌ Error: {e}")
             sys.stdout.flush()
+            # Move the file to the 'Failed' folder
+            try:
+                move_to_failed(file_path, self.config)
+            except Exception as move_e:
+                logging.error(f"  Failed to move {file_path.name} to Failed folder: {move_e}")
         finally:
             if file_path in self.processing:
                 self.processing.remove(file_path)
