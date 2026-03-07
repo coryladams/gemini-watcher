@@ -45,12 +45,12 @@ def load_config():
         "model": "gemini-3.1-flash",
         "routes": {
             "research": {
-                "extensions": ["pdf", "txt", "md"],
+                "extensions": ["pdf", "txt", "md", "rtf", "epub"],
                 "destination": "Research",
                 "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
             },
             "code": {
-                "extensions": ["py", "cpp", "h", "js", "ts"],
+                "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
                 "destination": "Research/Code",
                 "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
             },
@@ -64,8 +64,13 @@ def load_config():
                 "destination": "Research/Images",
                 "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
             },
+            "media": {
+                "extensions": ["mp3", "mp4", "wav", "m4a", "mov"],
+                "destination": "Research/Media",
+                "instructions": "Analyze this media file. For audio, provide a transcript and summary. For video, describe the visual content, any spoken words, and summarize the key events."
+            },
             "webpages": {
-                "extensions": ["html", "htm", "url", "webloc"],
+                "extensions": ["html", "htm", "mhtml", "mht", "xml", "url", "webloc", "desktop"],
                 "destination": "Research/Webclips",
                 "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources. (If provided a URL, fetch it first)."
             }
@@ -156,7 +161,7 @@ class VaultIndexer:
 # --- Read File (with PDF & URL support) -------------------------------------
 def read_file_content(file_path: Path) -> str | None:
     try:
-        if file_path.suffix.lower() == ".pdf":
+        if file_path.suffix.lower() in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"]:
             # Return None to trigger raw binary file processing by Gemini CLI
             return None
         elif file_path.suffix.lower() == ".docx":
@@ -181,6 +186,9 @@ def read_file_content(file_path: Path) -> str | None:
                     if any(row_text):
                         text.append("\t".join(row_text))
             return "\n".join(text)
+        elif file_path.suffix.lower() in [".mhtml", ".mht"]:
+            # MHTML files can be processed natively by Gemini
+            return None
         elif file_path.suffix.lower() == ".url":
             content = file_path.read_text(encoding="utf-8", errors="replace")
             for line in content.splitlines():
@@ -294,6 +302,8 @@ Task: {instructions}
     
     # Define fallback models (Ordered by Capability vs Cost)
     fallback_models = [
+        "gemini-3.1-flash",
+        "gemini-3.1-flash-lite",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-2.5-flash-lite",
@@ -407,7 +417,7 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
     else:
         # For all other files, append an embed link
         # Use ![[file]] for images/pdfs, and [[file]] for others like code
-        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf"] else ""
+        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"] else ""
         output += f"\n\n---\n## Source File\n{embed_prefix}[[{original_path.name}]]\n"
 
     dest_file.write_text(output, encoding="utf-8")
@@ -476,8 +486,8 @@ class GeminiHandler(FileSystemEventHandler):
         
         try:
             content = None
-            # Do not extract text for images or natively handled types (like PDF)
-            if route["name"] not in ["images"] and file_path.suffix.lower() not in [".pdf"]:
+            # Do not extract text for natively handled types (images, pdfs, media, mhtml)
+            if route["name"] not in ["images", "media"] and file_path.suffix.lower() not in [".pdf", ".mhtml", ".mht"]:
                 content = read_file_content(file_path)
                 if not content:
                     logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
