@@ -1,12 +1,13 @@
 {
   "watch_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop",
-  "vault_root": "C:\\Users\\cadams\\Documents\\Obsidian\\RegenMed\\Coding 1s & 0s",
+  "vault_root": "C:\\Users\\cadams\\Documents\\Obsidian\\RegenMed",
   "archive_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop\\Archive",
   "archive_originals": true,
-  "model": "gemini-2.0-flash",
+  "smart_routing": true,
+  "model": "gemini-3.1-flash-lite",
   "routes": {
     "research": {
-      "extensions": ["pdf", "txt", "md"],
+      "extensions": ["pdf", "txt", "md", "docx", "pptx"],
       "destination": "Research",
       "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
     },
@@ -16,7 +17,7 @@
       "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
     },
     "data": {
-      "extensions": ["csv", "json"],
+      "extensions": ["csv", "json", "xlsx"],
       "destination": "Research/Data",
       "instructions": "Analyze this dataset. Identify patterns, anomalies, and provide a high-level statistical summary."
     },
@@ -26,9 +27,9 @@
       "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
     },
     "webpages": {
-      "extensions": ["html", "htm"],
+      "extensions": ["html", "htm", "url", "webloc"],
       "destination": "Research/Webclips",
-      "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources."
+      "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources. (If provided a URL, fetch it first)."
     }
   }
 }

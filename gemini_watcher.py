@@ -15,13 +15,18 @@ import logging
 import subprocess
 import pypdf
 import shutil
+import hashlib
+import difflib
+import docx
+import pptx
+import openpyxl
 from pathlib import Path
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # --- Vault Configuration (Hardcoded for Cadams) -------------------------------
-VAULT_ROOT = "/mnt/c/Users/cadams/Documents/Obsidian/RegenMed/Coding 1s & 0s"
+VAULT_ROOT = "/mnt/c/Users/cadams/Documents/Obsidian/RegenMed"
 DEFAULT_WATCH_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop"
 DEFAULT_ARCHIVE_DIR = "/mnt/c/Users/cadams/Downloads/VaultDrop/Archive"
 ATTACHMENTS_DIR = "Research/Attachments"
@@ -34,7 +39,8 @@ def load_config():
         "vault_root": VAULT_ROOT,
         "archive_dir": DEFAULT_ARCHIVE_DIR,
         "archive_originals": True,
-        "model": "gemini-2.0-flash",
+        "smart_routing": True,
+        "model": "gemini-3.1-flash",
         "routes": {
             "research": {
                 "extensions": ["pdf", "txt", "md"],
@@ -88,6 +94,67 @@ def resolve_path(path: str) -> Path:
         return Path(f"/mnt/{drive}/{rest}")
     return Path(path).expanduser()
 
+# --- Vault Indexer -----------------------------------------------------------
+class VaultIndexer:
+    def __init__(self, vault_root: str):
+        self.vault_root = resolve_path(vault_root)
+        self.cache_file = Path(__file__).parent / ".vault_index.json"
+        self.ignore_dirs = {".git", ".obsidian", ".trash", "_attachments"}
+
+    def _get_dir_hash(self) -> str:
+        dir_stat = []
+        for root, dirs, files in os.walk(self.vault_root):
+            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith(".")]
+            try:
+                rel_path = str(Path(root).relative_to(self.vault_root))
+                dir_stat.append(rel_path)
+            except ValueError:
+                pass
+        return hashlib.md5("".join(dir_stat).encode()).hexdigest()
+
+    def get_map(self) -> list[str]:
+        if not self.vault_root.exists():
+            return []
+            
+        current_hash = self._get_dir_hash()
+        
+        if self.cache_file.exists():
+            try:
+                with open(self.cache_file, "r") as f:
+                    cache = json.load(f)
+                    if cache.get("hash") == current_hash:
+                        return cache.get("folders", [])
+            except Exception:
+                pass
+                
+        # Rebuild map
+        folders = []
+        for root, dirs, files in os.walk(self.vault_root):
+            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith(".")]
+            try:
+                rel_path = Path(root).relative_to(self.vault_root)
+                if str(rel_path) != ".":
+                    folders.append(str(rel_path).replace("\\", "/"))
+            except ValueError:
+                pass
+                
+        # Save cache
+        try:
+            with open(self.cache_file, "w") as f:
+                json.dump({"hash": current_hash, "folders": folders}, f)
+        except Exception as e:
+            logging.warning(f"Could not save vault index cache: {e}")
+            
+        return folders
+        
+    def fuzzy_match_folder(self, target: str, folders: list[str]) -> str | None:
+        if not target or target == "Inbox":
+            return None
+        if target in folders:
+            return target
+        matches = difflib.get_close_matches(target, folders, n=1, cutoff=0.6)
+        return matches[0] if matches else None
+
 # --- Read File (with PDF & URL support) -------------------------------------
 def read_file_content(file_path: Path) -> str | None:
     try:
@@ -97,6 +164,28 @@ def read_file_content(file_path: Path) -> str | None:
             for page in reader.pages:
                 text += page.extract_text() + "\n"
             return text
+        elif file_path.suffix.lower() == ".docx":
+            doc = docx.Document(file_path)
+            return "\n".join([para.text for para in doc.paragraphs])
+        elif file_path.suffix.lower() == ".pptx":
+            prs = pptx.Presentation(file_path)
+            text = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text.append(shape.text)
+            return "\n".join(text)
+        elif file_path.suffix.lower() == ".xlsx":
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            text = []
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                text.append(f"--- Sheet: {sheet} ---")
+                for row in ws.iter_rows(values_only=True):
+                    row_text = [str(cell) if cell is not None else "" for cell in row]
+                    if any(row_text):
+                        text.append("\t".join(row_text))
+            return "\n".join(text)
         elif file_path.suffix.lower() == ".url":
             content = file_path.read_text(encoding="utf-8", errors="replace")
             for line in content.splitlines():
@@ -112,7 +201,7 @@ def read_file_content(file_path: Path) -> str | None:
 
 # --- Clean Output -----------------------------------------------------------
 def clean_gemini_output(text: str) -> str:
-    """Removes CLI warnings and rogue code fences that break Obsidian."""
+    """Removes CLI warnings, rogue code fences, and conversational filler that break Obsidian."""
     lines = text.splitlines()
     
     # 1. Filter out known CLI warnings
@@ -133,8 +222,17 @@ def clean_gemini_output(text: str) -> str:
         text = text[5:]
     elif text.startswith("yaml\n"):
         text = "---\n" + text[5:]
+
+    # 4. Strip conversational filler before the first frontmatter ---
+    lines = text.splitlines()
+    if lines and not lines[0].strip().startswith("---"):
+        for i, line in enumerate(lines):
+            if line.strip() == "---":
+                # Found the likely start of frontmatter
+                text = "\n".join(lines[i:])
+                break
         
-    # 4. Enforce strict Obsidian frontmatter (must start with ---)
+    # 5. Enforce strict Obsidian frontmatter (must start with ---)
     if not text.startswith("---"):
         if text.startswith("title:") or text.startswith("create-date:"):
             text = "---\n" + text
@@ -153,15 +251,30 @@ def clean_gemini_output(text: str) -> str:
 def process_with_gemini(file_path: Path, content: str | None, route: dict, config: dict) -> str:
     instructions = route.get("instructions", "Analyze this file.")
     
+    routing_instruction = "8. Use Obsidian callouts (> [!summary], etc.) for key sections."
+    if config.get("smart_routing", False):
+        indexer = VaultIndexer(config["vault_root"])
+        folders = indexer.get_map()
+        folder_list = "\n".join(f"- {f}" for f in folders[:500])  # limit to 500
+        routing_instruction = f"""8. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
+   Include a `destination` key in the YAML frontmatter with the chosen path (e.g., `destination: Polaris/Schematics`).
+   If no specific project folder matches, use `{route.get("destination", "Research")}`.
+9. Use Obsidian callouts (> [!summary], etc.) for key sections.
+
+Vault Map (Existing Folders):
+{folder_list}
+"""
+    
     prompt = f"""<system_instruction>
 You are an expert Research Archivist. 
 Format the output as Obsidian-optimized Markdown.
 
 CRITICAL FORMATTING RULES:
-1. You MUST start your response with exactly three dashes `---` on the very first line.
-2. You MUST close the frontmatter block with exactly three dashes `---` on its own line.
-3. DO NOT wrap the frontmatter in a markdown code block (no ``` or ```yaml).
-4. YAML Frontmatter must use this EXACT structure (NO '#' symbols in the tags list):
+1. OUTPUT ONLY the Markdown file. DO NOT include any conversational filler (e.g. "I will begin by...").
+2. You MUST start your response with exactly three dashes `---` on the very first line to begin the YAML frontmatter.
+3. You MUST close the frontmatter block with exactly three dashes `---` on its own line.
+4. DO NOT wrap the frontmatter in a markdown code block (no ``` or ```yaml).
+5. YAML Frontmatter must use this EXACT structure (NO '#' symbols in the tags list):
 ---
 title: "[Descriptive Title]"
 create-date: {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -170,59 +283,113 @@ Project: Home
 tags:
   - tag1
   - tag2
+destination: {route.get("destination", "Research")}
 status: complete
 ---
-5. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
-6. Use [[wikilinks]] for technical concepts throughout the body.
-7. Use Obsidian callouts (> [!summary], etc.) for key sections.
+6. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
+7. DO NOT create wikilinks (`[[link]]`) to concepts or pages unless you are absolutely certain the page already exists in the user's vault. If in doubt, DO NOT use wikilinks. 
+{routing_instruction}
 </system_instruction>
 
 Task: {instructions}
 
 """
     
-    cmd = ["gemini"]
+    cmd_base = ["gemini"]
     
+    # Define fallback models
+    fallback_models = [
+      #  "gemini-3.1-flash-lite", 
+       # "gemini-3.1-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-3-flash-preview", 
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash"
+    ]
+    
+    # Always put the configured model first, followed by the rest
+    models_to_try = []
+    if "model" in config:
+        models_to_try.append(config["model"])
+        
+    for m in fallback_models:
+        if m not in models_to_try:
+            models_to_try.append(m)
+    
+    cmd_args = []
     # If content is None, it means it's a binary/image file.
     if content is None:
         # We copy it locally to the project dir so Gemini CLI can read it without workspace errors
         local_copy = Path(__file__).parent / file_path.name
         shutil.copy2(file_path, local_copy)
         
-        cmd.append(f"@{local_copy.name}")
-        cmd.append(prompt)
+        cmd_args.append(f"@{local_copy.name}")
+        cmd_args.append(prompt)
     else:
         # For text files, we append the content to the prompt
         max_chars = 500000 
         clean_content = content.replace("\u0000", "")
         prompt += f"\n--- FILE: {file_path.name} ---\n{clean_content[:max_chars]}\n--- END ---\n"
-        cmd.append(prompt)
+        cmd_args.append(prompt)
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8"
-        )
-        
-        # Cleanup the local copy if we made one
+        last_error = ""
+        for model in models_to_try:
+            cmd = cmd_base + ["--model", model] + cmd_args
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8"
+            )
+            
+            if result.returncode == 0:
+                if content is None:
+                    local_copy.unlink(missing_ok=True)
+                return clean_gemini_output(result.stdout.strip())
+            
+            last_error = result.stderr.strip()
+            # If the model is not found, try the next one in the fallback list
+            if "ModelNotFoundError" in last_error or "404" in last_error or "not found" in last_error.lower():
+                logging.warning(f"  ⚠️ Model '{model}' unavailable, trying next...")
+                continue
+            else:
+                # If it's a different error, fail fast
+                if content is None:
+                    local_copy.unlink(missing_ok=True)
+                raise RuntimeError(f"gemini command failed with {model}: {last_error}")
+                
         if content is None:
             local_copy.unlink(missing_ok=True)
-            
-        if result.returncode != 0:
-            raise RuntimeError(f"gemini command failed: {result.stderr.strip()}")
+        raise RuntimeError(f"All configured models failed. Last error: {last_error}")
         
-        raw_output = result.stdout.strip()
-        return clean_gemini_output(raw_output)
     except FileNotFoundError:
+        if 'local_copy' in locals():
+            local_copy.unlink(missing_ok=True)
         raise RuntimeError("Gemini CLI not found. Run 'npm install -g @google/gemini-cli'.")
 
 # --- Routing, Archiving & Embedding ------------------------------------------
 def route_output(original_path: Path, output: str, route: dict, config: dict):
+    target_dest = route.get("destination", "Inbox")
+    
+    if config.get("smart_routing", False):
+        import re
+        match = re.search(r"^destination:\s*(.+)$", output, re.MULTILINE | re.IGNORECASE)
+        if match:
+            suggested_dest = match.group(1).strip().strip("'\"")
+            indexer = VaultIndexer(config["vault_root"])
+            folders = indexer.get_map()
+            matched_dest = indexer.fuzzy_match_folder(suggested_dest, folders)
+            if matched_dest:
+                target_dest = matched_dest
+            else:
+                logging.info(f"  ⚠️ Could not match suggested destination '{suggested_dest}', using default '{target_dest}'")
+
     # 1. Write the markdown note
-    dest_dir = resolve_path(config["vault_root"]) / route.get("destination", "Inbox")
+    dest_dir = resolve_path(config["vault_root"]) / target_dest
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     dest_file = dest_dir / f"{original_path.stem}.md"
@@ -230,8 +397,11 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
         timestamp = datetime.now().strftime("%H%M%S")
         dest_file = dest_dir / f"{original_path.stem}-{timestamp}.md"
 
-    # Append the embed link if it's an image or PDF
-    if route["name"] in ["images", "research"] and original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf"]:
+    # Append the embed link if it's an image, PDF, or Office doc
+    attachable_exts = [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".docx", ".pptx", ".xlsx"]
+    attachable_routes = ["images", "research", "data"]
+    
+    if route["name"] in attachable_routes and original_path.suffix.lower() in attachable_exts:
         output += f"\n\n---\n## Source File\n![[{original_path.name}]]\n"
 
     # Append the source link if it's an internet shortcut
@@ -250,7 +420,7 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
     print(f"  ✅ Note → {wsl_to_windows(str(dest_file))}")
     
     # 2. Move the original file to the Obsidian attachments folder
-    if route["name"] in ["images", "research"] and original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf"]:
+    if route["name"] in attachable_routes and original_path.suffix.lower() in attachable_exts:
         attach_dir = resolve_path(config["vault_root"]) / ATTACHMENTS_DIR
         attach_dir.mkdir(parents=True, exist_ok=True)
         attach_file = attach_dir / original_path.name
