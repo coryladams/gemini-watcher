@@ -153,39 +153,26 @@ class VaultIndexer:
     def fuzzy_match_folder(self, target: str, folders: list[str]) -> str | None:
         if not target or target == "Inbox":
             return None
+        # Exact match on full path
         if target in folders:
             return target
+            
+        # Exact match on folder basename (e.g. 'Boba 2.0' matching 'Boba/Boba 2.0')
+        target_lower = target.lower()
+        for folder in folders:
+            if Path(folder).name.lower() == target_lower:
+                return folder
+                
+        # Fuzzy match fallback
         matches = difflib.get_close_matches(target, folders, n=1, cutoff=0.6)
         return matches[0] if matches else None
 
 # --- Read File (with PDF & URL support) -------------------------------------
 def read_file_content(file_path: Path) -> str | None:
     try:
-        if file_path.suffix.lower() in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"]:
+        if file_path.suffix.lower() in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov", ".docx", ".pptx", ".xlsx"]:
             # Return None to trigger raw binary file processing by Gemini CLI
             return None
-        elif file_path.suffix.lower() == ".docx":
-            doc = docx.Document(file_path)
-            return "\n".join([para.text for para in doc.paragraphs])
-        elif file_path.suffix.lower() == ".pptx":
-            prs = pptx.Presentation(file_path)
-            text = []
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        text.append(shape.text)
-            return "\n".join(text)
-        elif file_path.suffix.lower() == ".xlsx":
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-            text = []
-            for sheet in wb.sheetnames:
-                ws = wb[sheet]
-                text.append(f"--- Sheet: {sheet} ---")
-                for row in ws.iter_rows(values_only=True):
-                    row_text = [str(cell) if cell is not None else "" for cell in row]
-                    if any(row_text):
-                        text.append("\t".join(row_text))
-            return "\n".join(text)
         elif file_path.suffix.lower() in [".mhtml", ".mht"]:
             # MHTML files can be processed natively by Gemini
             return None
@@ -486,8 +473,8 @@ class GeminiHandler(FileSystemEventHandler):
         
         try:
             content = None
-            # Do not extract text for natively handled types (images, pdfs, media, mhtml)
-            if route["name"] not in ["images", "media"] and file_path.suffix.lower() not in [".pdf", ".mhtml", ".mht"]:
+            # Do not extract text for natively handled types (images, docs, pdfs, media, mhtml)
+            if route["name"] not in ["images", "media"] and file_path.suffix.lower() not in [".pdf", ".mhtml", ".mht", ".docx", ".pptx", ".xlsx"]:
                 content = read_file_content(file_path)
                 if not content:
                     logging.warning(f"SKIPPING: {file_path.name} (no content extracted)")
