@@ -7,3 +7,4 @@ mock_vault/
 test_full_flow.py
 test_routing.py
 Test_Motor_Info.md
+watcher.log
