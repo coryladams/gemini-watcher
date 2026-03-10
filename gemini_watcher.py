@@ -168,15 +168,44 @@ class VaultIndexer:
         return matches[0] if matches else None
 
 # --- Read File (with PDF & URL support) -------------------------------------
+def extract_docx_text(path: Path) -> str:
+    doc = docx.Document(path)
+    return "\n".join([p.text for p in doc.paragraphs])
+
+def extract_pptx_text(path: Path) -> str:
+    prs = pptx.Presentation(path)
+    text = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                text.append(shape.text)
+    return "\n".join(text)
+
+def extract_xlsx_text(path: Path) -> str:
+    wb = openpyxl.load_workbook(path, data_only=True)
+    text = []
+    for sheet in wb.worksheets:
+        text.append(f"--- Sheet: {sheet.title} ---")
+        for row in sheet.iter_rows(values_only=True):
+            text.append("\t".join([str(cell) if cell is not None else "" for cell in row]))
+    return "\n".join(text)
+
 def read_file_content(file_path: Path) -> str | None:
     try:
-        if file_path.suffix.lower() in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov", ".docx", ".pptx", ".xlsx"]:
+        suffix = file_path.suffix.lower()
+        if suffix in [".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"]:
             # Return None to trigger raw binary file processing by Gemini CLI
             return None
-        elif file_path.suffix.lower() in [".mhtml", ".mht"]:
+        elif suffix == ".docx":
+            return extract_docx_text(file_path)
+        elif suffix == ".pptx":
+            return extract_pptx_text(file_path)
+        elif suffix == ".xlsx":
+            return extract_xlsx_text(file_path)
+        elif suffix in [".mhtml", ".mht"]:
             # MHTML files can be processed natively by Gemini
             return None
-        elif file_path.suffix.lower() == ".url":
+        elif suffix == ".url":
             content = file_path.read_text(encoding="utf-8", errors="replace")
             for line in content.splitlines():
                 if line.upper().startswith("URL="):
@@ -282,6 +311,7 @@ status: complete
 </system_instruction>
 
 Task: {instructions}
+Original File Name: {file_path.name} (Use this file name as a strong hint for choosing the correct routing destination from the Vault Map)
 
 """
     
@@ -313,7 +343,7 @@ Task: {instructions}
         local_copy = Path(__file__).parent / file_path.name
         shutil.copy2(file_path, local_copy)
         
-        cmd_args.append(f"@{local_copy.name}")
+        cmd_args.append(f"@{local_copy.resolve()}")
         cmd_args.append(prompt)
     else:
         # For text files, we append the content to the prompt
@@ -332,7 +362,8 @@ Task: {instructions}
                 capture_output=True,
                 text=True,
                 timeout=300,
-                encoding="utf-8"
+                encoding="utf-8",
+                cwd=Path(__file__).parent
             )
             
             if result.returncode == 0:
