@@ -2,17 +2,23 @@
   "watch_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop",
   "vault_root": "C:\\Users\\cadams\\Documents\\Obsidian\\RegenMed",
   "archive_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop\\Archive",
+  "failed_dir": "C:\\Users\\cadams\\Downloads\\VaultDrop\\Failed",
   "archive_originals": true,
   "smart_routing": true,
-  "model": "gemini-3.1-flash-lite",
+  "model": "gemini-2.5-flash",
   "routes": {
     "research": {
-      "extensions": ["pdf", "txt", "md", "docx", "pptx"],
+      "extensions": ["pdf", "txt", "docx", "pptx", "rtf", "epub"],
       "destination": "Research",
       "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
     },
+    "markdown": {
+      "extensions": ["md"],
+      "destination": "Research",
+      "instructions": "Read the provided markdown document. You MUST output the ENTIRE original markdown content exactly as it is, but insert a brief Obsidian callout summary (> [!summary]) at the beginning of each major section summarizing that section."
+    },
     "code": {
-      "extensions": ["py", "cpp", "h", "js", "ts"],
+      "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
       "destination": "Research/Code",
       "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
     },
@@ -26,8 +32,13 @@
       "destination": "Research/Images",
       "instructions": "Analyze this image. If it is a diagram or schematic, explain its components and flow. If it is a screenshot of code or text, transcribe and summarize it. Describe the visual content in detail."
     },
+    "media": {
+      "extensions": ["mp3", "mp4", "wav", "m4a", "mov"],
+      "destination": "Research/Media",
+      "instructions": "Analyze this media file. For audio, provide a transcript and summary. For video, describe the visual content, any spoken words, and summarize the key events."
+    },
     "webpages": {
-      "extensions": ["html", "htm", "url", "webloc"],
+      "extensions": ["html", "htm", "mhtml", "mht", "xml", "url", "webloc", "desktop"],
       "destination": "Research/Webclips",
       "instructions": "Extract and summarize the main content of this webpage. Ignore navigation menus, ads, and boilerplate text. Identify the core argument, key facts, and any cited sources. (If provided a URL, fetch it first)."
     }

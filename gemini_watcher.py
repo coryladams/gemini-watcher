@@ -45,9 +45,14 @@ def load_config():
         "model": "gemini-3.1-flash",
         "routes": {
             "research": {
-                "extensions": ["pdf", "txt", "md", "rtf", "epub"],
+                "extensions": ["pdf", "txt", "rtf", "epub"],
                 "destination": "Research",
                 "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
+            },
+            "markdown": {
+                "extensions": ["md"],
+                "destination": "Research",
+                "instructions": "Read the provided markdown document. You MUST output the ENTIRE original markdown content exactly as it is, but insert a brief Obsidian callout summary (> [!summary]) at the beginning of each major section summarizing that section."
             },
             "code": {
                 "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
@@ -436,8 +441,8 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
             pass
     else:
         # For all other files, append an embed link
-        # Use ![[file]] for images/pdfs, and [[file]] for others like code
-        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov"] else ""
+        # Use ![[file]] for images/pdfs/md, and [[file]] for others like code
+        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov", ".md"] else ""
         output += f"\n\n---\n## Source File\n{embed_prefix}[[{original_path.name}]]\n"
 
     dest_file.write_text(output, encoding="utf-8")
