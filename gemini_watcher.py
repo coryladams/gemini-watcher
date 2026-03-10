@@ -270,15 +270,17 @@ def clean_gemini_output(text: str) -> str:
 def process_with_gemini(file_path: Path, content: str | None, route: dict, config: dict) -> str:
     instructions = route.get("instructions", "Analyze this file.")
     
-    routing_instruction = "8. Use Obsidian callouts (> [!summary], etc.) for key sections."
+    extra_instructions = f"""8. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
+9. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."""
     if config.get("smart_routing", False):
         indexer = VaultIndexer(config["vault_root"])
         folders = indexer.get_map()
         folder_list = "\n".join(f"- {f}" for f in folders[:500])  # limit to 500
-        routing_instruction = f"""8. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
+        extra_instructions = f"""8. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
    Include a `destination` key in the YAML frontmatter with the chosen path (e.g., `destination: Polaris/Schematics`).
    If no specific project folder matches, use `{route.get("destination", "Research")}`.
-9. Use Obsidian callouts (> [!summary], etc.) for key sections.
+9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
+10. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number.
 
 Vault Map (Existing Folders):
 {folder_list}
@@ -297,17 +299,17 @@ CRITICAL FORMATTING RULES:
 ---
 title: "[Descriptive Title]"
 create-date: {datetime.now().strftime("%Y-%m-%d %H:%M")}
-type: reference
-Project: Home
+type: [Choose most appropriate: reference, meeting, project, tutorial, logs]
+Project: [Infer from filename/content, or 'Home']
 tags:
   - tag1
   - tag2
-destination: {route.get("destination", "Research")}
+destination: [Destination Path]
 status: complete
 ---
-6. PREFERRED TAGS: Use these existing tags if relevant: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]
+6. TAGGING RULES: Generate 3-5 highly relevant tags based on the document's content and Original File Name (e.g. if the file is 'Boba2_Fluid.pdf', use 'boba2'). PREFER reusing these existing tags if applicable: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]. Do not create too many new tags.
 7. DO NOT create wikilinks (`[[link]]`) to concepts or pages unless you are absolutely certain the page already exists in the user's vault. If in doubt, DO NOT use wikilinks. 
-{routing_instruction}
+{extra_instructions}
 </system_instruction>
 
 Task: {instructions}
