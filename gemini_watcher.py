@@ -445,7 +445,7 @@ Original File Name: {file_path.name} (Use this file name as a strong hint for ch
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=config.get("timeout", 900),
                     encoding="utf-8",
                     cwd=Path(__file__).parent,
                     env=env

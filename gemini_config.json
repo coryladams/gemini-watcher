@@ -6,6 +6,7 @@
   "archive_originals": true,
   "smart_routing": true,
   "model": "gemini-2.5-flash",
+  "timeout": 900,
   "routes": {
     "research": {
       "extensions": ["pdf", "txt", "docx", "pptx", "rtf", "epub"],
