@@ -347,25 +347,10 @@ def process_with_gemini(file_path: Path, content: str | None, route: dict, confi
 
     pdf_instruction = ""
     if file_path.suffix.lower() == ".pdf":
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(file_path)
-            num_pages = len(reader.pages)
-            is_landscape = False
-            if num_pages > 0 and "/MediaBox" in reader.pages[0]:
-                box = reader.pages[0]["/MediaBox"]
-                width = float(box[2]) - float(box[0])
-                height = float(box[3]) - float(box[1])
-                is_landscape = width > height
-            
-            if is_landscape or num_pages < 20:
-                # Treat as a slide deck or short document
-                pdf_instruction = f"\n11. This appears to be a presentation or short PDF. Embed EACH specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."
-            else:
-                # Treat as a large reference document
-                pdf_instruction = f"\n11. This is a large reference document. DO NOT summarize page-by-page. Provide an extremely detailed, comprehensive summary of the entire document with major points outlined. At the very end of your response, embed the entire PDF once using: `![[{file_path.name}]]`"
-        except Exception as e:
-            pdf_instruction = f"\n11. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."
+        pdf_instruction = f"""
+11. DYNAMIC PDF FORMATTING: Analyze the structure and flow of the document to determine the best way to summarize it:
+    - IF it is a presentation, slide deck, or highly visual document: Summarize it section-by-section and embed EACH specific relevant page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number.
+    - IF it is a continuous text document (like a research paper, manual, or whitepaper): DO NOT summarize page-by-page. Provide an extremely detailed, comprehensive summary of the entire document with major points outlined. At the very end of your response, embed the entire PDF once using: `![[{file_path.name}]]`"""
 
     extra_instructions = f"""9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).{pdf_instruction}"""
     if config.get("smart_routing", False):
