@@ -19,7 +19,7 @@
     },
     "code": {
       "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
-      "destination": "Research/Code",
+      "destination": "Coding 1s & 0s/Code",
       "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
     },
     "data": {

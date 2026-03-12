@@ -42,10 +42,10 @@ def load_config():
         "failed_dir": DEFAULT_FAILED_DIR,
         "archive_originals": True,
         "smart_routing": True,
-        "model": "gemini-3.1-flash",
+        "model": "gemini-2.5-flash",
         "routes": {
             "research": {
-                "extensions": ["pdf", "txt", "rtf", "epub"],
+                "extensions": ["pdf", "txt", "docx", "pptx", "rtf", "epub"],
                 "destination": "Research",
                 "instructions": "Summarize this technical document. Identify key concepts, tools, and methodologies. Use callouts for summaries and warnings."
             },
@@ -56,11 +56,11 @@ def load_config():
             },
             "code": {
                 "extensions": ["py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql"],
-                "destination": "Research/Code",
+                "destination": "Coding 1s & 0s/Code",
                 "instructions": "Explain this source code. Detail the architecture, key functions, and any dependencies found."
             },
             "data": {
-                "extensions": ["csv", "json"],
+                "extensions": ["csv", "json", "xlsx"],
                 "destination": "Research/Data",
                 "instructions": "Analyze this dataset. Identify patterns, anomalies, and provide a high-level statistical summary."
             },
@@ -115,8 +115,11 @@ class VaultIndexer:
         self.cache_expiry = 86400  # 24 hours
 
     def get_map(self) -> list[str]:
+        return self.get_cache().get("folders", [])
+        
+    def get_cache(self) -> dict:
         if not self.vault_root.exists():
-            return []
+            return {"folders": [], "files": {}, "tags": []}
             
         # Check cache validity
         if self.cache_file.exists():
@@ -124,13 +127,18 @@ class VaultIndexer:
                 with open(self.cache_file, "r") as f:
                     cache = json.load(f)
                     if time.time() - cache.get("timestamp", 0) < self.cache_expiry:
-                        return cache.get("folders", [])
+                        return cache
             except Exception:
                 pass
                 
-        # Rebuild map
+        # Rebuild cache
         folders = []
-        for root, dirs, files in os.walk(self.vault_root):
+        files = {}
+        tags = set()
+        import re
+        tag_pattern = re.compile(r"^  - ([a-zA-Z0-9_-]+)$")
+        
+        for root, dirs, filenames in os.walk(self.vault_root):
             dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith(".")]
             try:
                 rel_path = Path(root).relative_to(self.vault_root)
@@ -139,14 +147,44 @@ class VaultIndexer:
             except ValueError:
                 pass
                 
-        # Save cache
+            for f in filenames:
+                if f.endswith(".md"):
+                    basename = Path(f).stem
+                    filepath = Path(root) / f
+                    try:
+                        rel_file = str(filepath.relative_to(self.vault_root)).replace("\\", "/")
+                        files[basename] = rel_file
+                    except ValueError:
+                        continue
+                    
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="ignore") as fp:
+                            in_tags = False
+                            for i, line in enumerate(fp):
+                                if i > 40: break
+                                if line.startswith("tags:"):
+                                    in_tags = True
+                                elif in_tags and line.startswith("  - "):
+                                    match = tag_pattern.match(line.rstrip())
+                                    if match: tags.add(match.group(1))
+                                elif in_tags and not line.startswith(" "):
+                                    in_tags = False
+                    except Exception:
+                        pass
+                
+        cache_data = {
+            "timestamp": time.time(),
+            "folders": folders,
+            "files": files,
+            "tags": list(tags)
+        }
         try:
             with open(self.cache_file, "w") as f:
-                json.dump({"timestamp": time.time(), "folders": folders}, f)
+                json.dump(cache_data, f)
         except Exception as e:
             logging.warning(f"Could not save vault index cache: {e}")
             
-        return folders
+        return cache_data
 
     def invalidate_cache(self):
         if self.cache_file.exists():
@@ -275,17 +313,47 @@ def clean_gemini_output(text: str) -> str:
 def process_with_gemini(file_path: Path, content: str | None, route: dict, config: dict) -> str:
     instructions = route.get("instructions", "Analyze this file.")
     
-    extra_instructions = f"""8. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
-9. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."""
+    indexer = VaultIndexer(config["vault_root"])
+    cache = indexer.get_cache()
+    folders = cache.get("folders", [])
+    existing_tags = cache.get("tags", [])
+    existing_files = list(cache.get("files", {}).keys())
+    
+    import re
+    words = set(re.findall(r'\w+', file_path.stem.lower()))
+    words = {w for w in words if len(w) > 3}
+    related_files = set()
+    if words:
+        for ef in existing_files:
+            ef_words = set(re.findall(r'\w+', ef.lower()))
+            if words & ef_words:
+                related_files.add(ef)
+    related_files = list(related_files)[:20]
+    
+    related_context = ""
+    if related_files:
+        related_list = ", ".join(f"[[{f}]]" for f in related_files if f != file_path.stem)
+        if related_list:
+            related_context = f"\n   These existing vault notes share keywords with the file name. Link to them if relevant:\n   {related_list}"
+            
+    sibling_files = config.get("sibling_files", [])
+    if sibling_files:
+        siblings_list = ", ".join(f"[[{Path(s).stem}]]" for s in sibling_files if s != file_path.name)
+        if siblings_list:
+            related_context += f"\n   Files dropped in the same batch (Link to these in a 'Related' section):\n   {siblings_list}"
+
+    tags_list = ", ".join(existing_tags[:100])
+    tags_rule = f"Generate 3-5 highly relevant tags. PREFER reusing these existing tags: [{tags_list}]. If no existing tag fits, create a new one." if tags_list else "Generate 3-5 highly relevant tags based on the document's content and Original File Name."
+
+    extra_instructions = f"""9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
+10. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."""
     if config.get("smart_routing", False):
-        indexer = VaultIndexer(config["vault_root"])
-        folders = indexer.get_map()
         folder_list = "\n".join(f"- {f}" for f in folders[:500])  # limit to 500
-        extra_instructions = f"""8. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
+        extra_instructions = f"""9. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
    Include a `destination` key in the YAML frontmatter with the chosen path (e.g., `destination: Polaris/Schematics`).
    If no specific project folder matches, use `{route.get("destination", "Research")}`.
-9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
-10. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number.
+10. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
+11. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number.
 
 Vault Map (Existing Folders):
 {folder_list}
@@ -310,10 +378,12 @@ tags:
   - tag1
   - tag2
 destination: [Destination Path]
+update_backlinks: []
 status: complete
 ---
-6. TAGGING RULES: Generate 3-5 highly relevant tags based on the document's content and Original File Name (e.g. if the file is 'Boba2_Fluid.pdf', use 'boba2'). PREFER reusing these existing tags if applicable: [arduino, cpp, python, automation, hardware, schematics, research, data, tutorial, plc]. Do not create too many new tags.
-7. DO NOT create wikilinks (`[[link]]`) to concepts or pages unless you are absolutely certain the page already exists in the user's vault. If in doubt, DO NOT use wikilinks. 
+6. TAGGING RULES: {tags_rule}
+7. LINKING: You MUST add a '## Related Notes' section at the bottom of the document and add wikilinks to related concepts if appropriate.{related_context}
+8. BACKLINKS: If you strongly believe an existing note in the vault should be updated to point back to this new note, include its EXACT name (without the .md extension) in the `update_backlinks` list in the YAML frontmatter. Only do this for highly relevant existing notes.
 {extra_instructions}
 </system_instruction>
 
@@ -362,29 +432,45 @@ Original File Name: {file_path.name} (Use this file name as a strong hint for ch
     try:
         last_error = ""
         for model in models_to_try:
-            cmd = cmd_base + ["--model", model] + cmd_args
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                encoding="utf-8",
-                cwd=Path(__file__).parent
-            )
-            
-            if result.returncode == 0:
-                if content is None:
-                    local_copy.unlink(missing_ok=True)
-                return clean_gemini_output(result.stdout.strip())
-            
-            last_error = result.stderr.strip()
-            # If the model is not found, try the next one in the fallback list
-            if "ModelNotFoundError" in last_error or "404" in last_error or "not found" in last_error.lower():
-                logging.warning(f"  ⚠️ Model '{model}' unavailable, trying next...")
+            retries = 2
+            success = False
+            for attempt in range(retries):
+                cmd = cmd_base + ["--model", model] + cmd_args
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    encoding="utf-8",
+                    cwd=Path(__file__).parent
+                )
+                
+                if result.returncode == 0:
+                    if content is None:
+                        local_copy.unlink(missing_ok=True)
+                    return clean_gemini_output(result.stdout.strip())
+                
+                last_error = result.stderr.strip()
+                
+                # Check for known transient/network errors
+                transient_errors = ["AbortError", "fetch failed", "503", "504", "timeout"]
+                is_transient = any(err in last_error for err in transient_errors)
+                
+                if is_transient and attempt < retries - 1:
+                    logging.warning(f"  ⚠️ Transient error with model '{model}': {last_error.splitlines()[-1] if last_error else 'Unknown'}. Retrying ({attempt+1}/{retries})...")
+                    time.sleep(5)
+                    continue
+                else:
+                    break # Break retry loop, move to next model or fail
+                    
+            # If the model is not found or we exhausted retries on transient errors, try the next model
+            not_found_errors = ["ModelNotFoundError", "404", "not found"]
+            if any(err in last_error.lower() for err in not_found_errors) or is_transient:
+                logging.warning(f"  ⚠️ Model '{model}' failed or unavailable, trying next...")
                 continue
             else:
-                # If it's a different error, fail fast
+                # If it's a different persistent error, fail fast
                 if content is None:
                     local_copy.unlink(missing_ok=True)
                 raise RuntimeError(f"gemini command failed with {model}: {last_error}")
@@ -442,22 +528,58 @@ def route_output(original_path: Path, output: str, route: dict, config: dict):
     else:
         # For all other files, append an embed link
         # Use ![[file]] for images/pdfs/md, and [[file]] for others like code
-        embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov", ".md"] else ""
-        output += f"\n\n---\n## Source File\n{embed_prefix}[[{original_path.name}]]\n"
+        if original_path.is_dir():
+            output += f"\n\n---\n## Source Folder\n[[{original_path.name}]]\n"
+        else:
+            embed_prefix = "!" if original_path.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp", ".pdf", ".mp3", ".mp4", ".wav", ".m4a", ".mov", ".md"] else ""
+            output += f"\n\n---\n## Source File\n{embed_prefix}[[{original_path.name}]]\n"
 
     dest_file.write_text(output, encoding="utf-8")
     print(f"  ✅ Note → {wsl_to_windows(str(dest_file))}")
-    
+
+    # Process backlinks
+    try:
+        backlinks = []
+        in_backlinks = False
+        for line in output.splitlines():
+            if line.startswith("update_backlinks:"):
+                in_backlinks = True
+            elif in_backlinks and line.startswith("  - "):
+                backlinks.append(line[4:].strip().strip("'\"[]"))
+            elif in_backlinks and not line.startswith(" "):
+                in_backlinks = False
+
+        if backlinks:
+            cache = VaultIndexer(config["vault_root"]).get_cache()
+            file_map = cache.get("files", {})
+            for bl in backlinks:
+                if bl in file_map:
+                    target_path = resolve_path(config["vault_root"]) / file_map[bl]
+                    if target_path.exists():
+                        bl_content = target_path.read_text(encoding="utf-8")
+                        bl_content += f"\n\n---\n**Related:** [[{dest_file.stem}]]\n"
+                        target_path.write_text(bl_content, encoding="utf-8")
+                        print(f"  🔗 Added backlink to {bl}")
+                        logging.info(f"  Added backlink to {bl}")
+    except Exception as e:
+        logging.error(f"  Failed to process backlinks: {e}")
+
     # 2. Always move the original file to the Obsidian attachments folder (except shortcuts)
-    if original_path.suffix.lower() not in [".url", ".webloc"]:
+    if not config.get("skip_attachment", False) and original_path.suffix.lower() not in [".url", ".webloc"]:
         attach_dir = resolve_path(config["vault_root"]) / ATTACHMENTS_DIR
         attach_dir.mkdir(parents=True, exist_ok=True)
         attach_file = attach_dir / original_path.name
         
         if attach_file.exists():
-            attach_file = attach_dir / f"{original_path.stem}-{int(time.time())}{original_path.suffix}"
+            if original_path.is_dir():
+                attach_file = attach_dir / f"{original_path.name}-{int(time.time())}"
+            else:
+                attach_file = attach_dir / f"{original_path.stem}-{int(time.time())}{original_path.suffix}"
             
-        shutil.copy2(original_path, attach_file)
+        if original_path.is_dir():
+            shutil.copytree(str(original_path), str(attach_file))
+        else:
+            shutil.copy2(original_path, attach_file)
         print(f"  ✅ Attachment → {wsl_to_windows(str(attach_file))}")
         
     sys.stdout.flush()
@@ -468,15 +590,23 @@ def move_to_failed(file_path: Path, config: dict):
     dest = failed_dir / file_path.name
     # Append timestamp if it exists to avoid overwriting failed files
     if dest.exists():
-         dest = failed_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
-    file_path.rename(dest)
+        if file_path.is_dir():
+            dest = failed_dir / f"{file_path.name}-{int(time.time())}"
+        else:
+            dest = failed_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
+    shutil.move(str(file_path), str(dest))
     logging.info(f"  ❌ Moved to Failed: {file_path.name}")
 
 def archive_original(file_path: Path, config: dict):
     archive_dir = resolve_path(config["archive_dir"])
     archive_dir.mkdir(parents=True, exist_ok=True)
     dest = archive_dir / file_path.name
-    file_path.rename(dest)
+    if dest.exists():
+        if file_path.is_dir():
+            dest = archive_dir / f"{file_path.name}-{int(time.time())}"
+        else:
+            dest = archive_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
+    shutil.move(str(file_path), str(dest))
     logging.info(f"  📦 Archived: {file_path.name}")
 
 # --- Event Handler -----------------------------------------------------------
@@ -486,11 +616,116 @@ class GeminiHandler(FileSystemEventHandler):
         self.processing = set()
 
     def on_created(self, event):
-        if event.is_directory: return
         self.process(Path(event.src_path))
+
+    def process_directory(self, dir_path: Path):
+        self.processing.add(dir_path)
+        logging.info(f"DETECTED FOLDER: {dir_path.name}")
+        print(f"\n📁 {dir_path.name}")
+        sys.stdout.flush()
+        
+        # Wait for folder size to stabilize
+        last_size = -1
+        retries = 0
+        while retries < 15:
+            current_size = sum(f.stat().st_size for f in dir_path.rglob('*') if f.is_file())
+            if current_size == last_size and current_size >= 0:
+                if current_size > 0 or retries > 2:
+                    break
+            last_size = current_size
+            time.sleep(2)
+            retries += 1
+        
+        try:
+            all_files = []
+            for root, _, files in os.walk(dir_path):
+                for f in files:
+                    if not f.startswith("."):
+                        all_files.append(Path(root) / f)
+                        
+            if not all_files:
+                logging.warning(f"SKIPPING: {dir_path.name} (empty folder)")
+                return
+
+            code_extensions = {"py", "cpp", "h", "js", "ts", "ino", "sh", "yaml", "xml", "sql", "html", "css", "json", "c", "java", "go", "rs", "php", "rb"}
+            code_count = sum(1 for f in all_files if f.suffix.lower().lstrip(".") in code_extensions)
+            is_code_majority = (code_count / len(all_files)) >= 0.5
+            
+            destination = "coding 1s & 0s" if is_code_majority else "Research"
+            target_folder = f"{destination}/{dir_path.name}"
+            
+            folder_config = self.config.copy()
+            folder_config["smart_routing"] = False
+            folder_config["skip_attachment"] = True
+            folder_config["sibling_files"] = [f.name for f in all_files]
+            
+            for f in all_files:
+                ext = f.suffix.lower().lstrip(".")
+                route = None
+                for r_name, r_data in self.config["routes"].items():
+                    if ext in r_data["extensions"]:
+                        route = r_data.copy()
+                        route["name"] = r_name
+                        break
+                        
+                if not route:
+                    route = {
+                        "name": "unknown",
+                        "extensions": [],
+                        "instructions": "Analyze this file.",
+                    }
+                
+                route["destination"] = target_folder
+                
+                try:
+                    content = None
+                    if route.get("name") not in ["images", "media"] and f.suffix.lower() not in [".pdf", ".mhtml", ".mht", ".docx", ".pptx", ".xlsx"]:
+                        content = read_file_content(f)
+                        if not content and f.suffix.lower() not in [".url", ".webloc"]:
+                            logging.warning(f"SKIPPING: {f.name} (no content extracted)")
+                            continue
+                            
+                    logging.info(f"PROCESSING FOLDER FILE: {f.name} via Gemini ({route.get('name', 'unknown')})")
+                    print(f"  🤖 Processing {f.name} via Gemini...")
+                    sys.stdout.flush()
+                    
+                    output = process_with_gemini(f, content, route, folder_config)
+                    route_output(f, output, route, folder_config)
+                except Exception as file_e:
+                    logging.error(f"  ❌ Error processing {f.name}: {file_e}")
+                    print(f"  ❌ Error processing {f.name}: {file_e}")
+                    sys.stdout.flush()
+            
+            # Copy whole directory to attachments
+            attach_dir = resolve_path(self.config["vault_root"]) / ATTACHMENTS_DIR
+            attach_dir.mkdir(parents=True, exist_ok=True)
+            attach_file = attach_dir / dir_path.name
+            if attach_file.exists():
+                attach_file = attach_dir / f"{dir_path.name}-{int(time.time())}"
+            shutil.copytree(str(dir_path), str(attach_file))
+            print(f"  ✅ Folder Attachment → {wsl_to_windows(str(attach_file))}")
+            
+            if self.config["archive_originals"]:
+                archive_original(dir_path, self.config)
+                
+        except Exception as e:
+            logging.error(f"ERROR: {dir_path.name}: {e}")
+            print(f"  ❌ Error: {e}")
+            sys.stdout.flush()
+            try:
+                move_to_failed(dir_path, self.config)
+            except Exception as move_e:
+                logging.error(f"  Failed to move {dir_path.name} to Failed folder: {move_e}")
+        finally:
+            if dir_path in self.processing:
+                self.processing.remove(dir_path)
 
     def process(self, file_path: Path):
         if file_path in self.processing or not file_path.exists():
+            return
+            
+        if file_path.is_dir():
+            self.process_directory(file_path)
             return
         
         ext = file_path.suffix.lower().lstrip(".")
@@ -575,7 +810,7 @@ def main():
     try:
         while True:
             for item in watch_dir.iterdir():
-                if item.is_file() and not item.name.startswith("."):
+                if not item.name.startswith("."):
                     handler.process(item)
             time.sleep(10)
     except KeyboardInterrupt:
