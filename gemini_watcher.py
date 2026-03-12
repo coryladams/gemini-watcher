@@ -721,6 +721,13 @@ class GeminiHandler(FileSystemEventHandler):
                 self.processing.remove(dir_path)
 
     def process(self, file_path: Path):
+        archive_dir = resolve_path(self.config["archive_dir"])
+        failed_dir = resolve_path(self.config["failed_dir"])
+
+        # Completely ignore the archive and failed directories and their contents
+        if file_path.is_relative_to(archive_dir) or file_path.is_relative_to(failed_dir):
+            return
+
         if file_path in self.processing or not file_path.exists():
             return
             
