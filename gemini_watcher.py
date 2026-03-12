@@ -437,13 +437,18 @@ Original File Name: {file_path.name} (Use this file name as a strong hint for ch
             for attempt in range(retries):
                 cmd = cmd_base + ["--model", model] + cmd_args
                 
+                # Copy environment to pass down variables like API keys and inject bypass flag
+                env = os.environ.copy()
+                env["GEMINI_BYPASS_ROUTER"] = "1"
+                
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
                     timeout=300,
                     encoding="utf-8",
-                    cwd=Path(__file__).parent
+                    cwd=Path(__file__).parent,
+                    env=env
                 )
                 
                 if result.returncode == 0:
