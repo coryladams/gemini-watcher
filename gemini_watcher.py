@@ -345,15 +345,35 @@ def process_with_gemini(file_path: Path, content: str | None, route: dict, confi
     tags_list = ", ".join(existing_tags[:100])
     tags_rule = f"Generate 3-5 highly relevant tags. PREFER reusing these existing tags: [{tags_list}]. If no existing tag fits, create a new one." if tags_list else "Generate 3-5 highly relevant tags based on the document's content and Original File Name."
 
-    extra_instructions = f"""9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
-10. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."""
+    pdf_instruction = ""
+    if file_path.suffix.lower() == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            num_pages = len(reader.pages)
+            is_landscape = False
+            if num_pages > 0 and "/MediaBox" in reader.pages[0]:
+                box = reader.pages[0]["/MediaBox"]
+                width = float(box[2]) - float(box[0])
+                height = float(box[3]) - float(box[1])
+                is_landscape = width > height
+            
+            if is_landscape or num_pages < 20:
+                # Treat as a slide deck or short document
+                pdf_instruction = f"\n11. This appears to be a presentation or short PDF. Embed EACH specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."
+            else:
+                # Treat as a large reference document
+                pdf_instruction = f"\n11. This is a large reference document. DO NOT summarize page-by-page. Provide an extremely detailed, comprehensive summary of the entire document with major points outlined. At the very end of your response, embed the entire PDF once using: `![[{file_path.name}]]`"
+        except Exception as e:
+            pdf_instruction = f"\n11. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number."
+
+    extra_instructions = f"""9. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).{pdf_instruction}"""
     if config.get("smart_routing", False):
         folder_list = "\n".join(f"- {f}" for f in folders[:500])  # limit to 500
         extra_instructions = f"""9. SMART ROUTING: Choose the most appropriate existing folder for this document from the vault map below.
    Include a `destination` key in the YAML frontmatter with the chosen path (e.g., `destination: Polaris/Schematics`).
    If no specific project folder matches, use `{route.get("destination", "Research")}`.
-10. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).
-11. If summarizing a multi-page PDF, embed each specific page alongside its summary using Obsidian syntax: `![[{file_path.name}#page=X]]` where X is the page number.
+10. Use Obsidian callouts (> [!summary], etc.) for key sections. Ensure distinct callouts are separated by a completely empty line (no `>`).{pdf_instruction}
 
 Vault Map (Existing Folders):
 {folder_list}
